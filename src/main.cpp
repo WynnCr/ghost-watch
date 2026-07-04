@@ -16,6 +16,10 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <filesystem>
+#include <sys/stat.h>
+#include <fstream>
+
 using json = nlohmann::json;
 
 // --- CRITICAL FIX: Match the XDG Base Directory path used in dashboard.cpp ---
@@ -27,7 +31,7 @@ std::string get_db_path() {
   std::string dir = std::string(home) + "/.local/share/ghost-watch";
 
   // Ensure the directory exists before SQLite tries to open a file inside it
-  std::system(("mkdir -p " + dir).c_str());
+  std::filesystem::create_directories(dir);
 
   return dir + "/screentime.db";
 }
@@ -56,6 +60,10 @@ sqlite3 *init_database() {
     std::cerr << "[ERROR] SQL error: " << err_msg << std::endl;
     sqlite3_free(err_msg);
   } else {
+    // Enable WAL mode and busy timeout to allow TUI continuous reads concurrently
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", 0, 0, 0);
+    sqlite3_busy_timeout(db, 5000);
+
     std::cout << "[SUCCESS] SQLite Database initialized (" << db_file << ")!"
               << std::endl;
   }
@@ -102,93 +110,151 @@ int main() {
   }
   std::cout << "[SUCCESS] EventStream requested!" << std::endl;
 
+  // Set timeout to poll for idle detection
+  struct timeval tv;
+  tv.tv_sec = 2;
+  tv.tv_usec = 0;
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
   // State trackers
   int current_focused_id = -1;
   auto focus_start_time = std::chrono::steady_clock::now();
   std::map<int, std::pair<std::string, std::string>> window_directory;
+  bool was_idle = false;
 
-  std::cout << "[LISTENING] Tracking screen time directly to database..."
-            << std::endl;
+  auto log_current_focus = [&](int duration) {
+    if (current_focused_id != -1 && duration > 0) {
+      std::string app = "Unknown", title = "Unknown";
+      if (window_directory.count(current_focused_id)) {
+        app = window_directory[current_focused_id].first;
+        title = window_directory[current_focused_id].second;
+      }
+
+      std::cout << "[LOGGED] " << app << " for " << duration << "s" << std::endl;
+
+      std::string sql =
+          "INSERT INTO window_usage (app_id, window_title, duration_seconds) VALUES (?, ?, ?);";
+      sqlite3_stmt *stmt;
+      sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+
+      sqlite3_bind_text(stmt, 1, app.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int(stmt, 3, duration);
+
+      sqlite3_step(stmt);
+      sqlite3_finalize(stmt);
+    }
+  };
+
+  auto sync_focus_state = [&]() {
+    std::string active_app = "None";
+    std::string active_title = "None";
+    if (!was_idle && current_focused_id != -1 && window_directory.count(current_focused_id)) {
+      active_app = window_directory[current_focused_id].first;
+      active_title = window_directory[current_focused_id].second;
+    }
+    std::ofstream app_file("/tmp/ghost-watch-current-app");
+    if (app_file) {
+      app_file << active_app << "\n";
+      app_file << active_title << "\n";
+      app_file << (long long)time(nullptr) << "\n";
+    }
+  };
+
+  std::cout << "[LISTENING] Tracking screen time directly to database..." << std::endl;
   char buffer[8192];
+  std::string leftover;
 
   while (true) {
     ssize_t bytes_read = read(sock, buffer, sizeof(buffer) - 1);
+    
+    if (bytes_read == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      struct stat st;
+      bool is_idle = (stat("/tmp/ghost-watch-idle", &st) == 0);
+      auto now = std::chrono::steady_clock::now();
+
+      if (is_idle && !was_idle) {
+        // System just went idle. Log duration and suspend accumulation.
+        int duration = std::chrono::duration_cast<std::chrono::seconds>(now - focus_start_time).count();
+        log_current_focus(duration);
+        was_idle = is_idle;
+        sync_focus_state();
+      } else if (!is_idle && was_idle) {
+        // System woke up. Reset the start time so the idle period isn't counted.
+        focus_start_time = now;
+        was_idle = is_idle;
+        sync_focus_state();
+      }
+      
+      was_idle = is_idle;
+      continue;
+    }
+
     if (bytes_read > 0) {
       buffer[bytes_read] = '\0';
-      std::string raw_data(buffer);
+      std::string raw_data = leftover + buffer;
+      leftover.clear();
+
       std::istringstream stream(raw_data);
       std::string line;
 
       while (std::getline(stream, line)) {
         if (line.empty())
           continue;
+        
+        // If the string doesn't end with a newline, the last line is incomplete.
+        if (stream.eof() && raw_data.back() != '\n') {
+          leftover = line;
+          break;
+        }
 
         try {
           json event = json::parse(line);
 
           if (event.contains("WindowsChanged")) {
             for (auto &window : event["WindowsChanged"]["windows"]) {
+              if (window["id"].is_number()) {
+                int win_id = window["id"];
+                std::string app = window["app_id"].is_string() ? window["app_id"] : "Unknown App";
+                std::string title = window["title"].is_string() ? window["title"] : "No Title";
+                window_directory[win_id] = {app, title};
+              }
+            }
+          }
+
+          if (event.contains("WindowOpenedOrChanged")) {
+            auto window = event["WindowOpenedOrChanged"]["window"];
+            if (window["id"].is_number()) {
               int win_id = window["id"];
-              std::string app = window["app_id"].is_string() ? window["app_id"]
-                                                             : "Unknown App";
-              std::string title =
-                  window["title"].is_string() ? window["title"] : "No Title";
+              std::string app = window["app_id"].is_string() ? window["app_id"] : "Unknown App";
+              std::string title = window["title"].is_string() ? window["title"] : "No Title";
               window_directory[win_id] = {app, title};
             }
           }
 
-          // store new window details when they open
-          if (event.contains("WindowOpenedOrChanged")) {
-            auto window = event["WindowOpenedOrChanged"]["window"];
-            int win_id = window["id"];
-            std::string app =
-                window["app_id"].is_string() ? window["app_id"] : "Unknown App";
-            std::string title =
-                window["title"].is_string() ? window["title"] : "No Title";
-
-            window_directory[win_id] = {app, title};
+          if (event.contains("WindowClosed")) {
+            auto closed_data = event["WindowClosed"];
+            if (closed_data["id"].is_number()) {
+              int win_id = closed_data["id"];
+              window_directory.erase(win_id);
+            }
           }
 
           if (event.contains("WindowFocusChanged")) {
             auto focus_data = event["WindowFocusChanged"];
             auto now = std::chrono::steady_clock::now();
-            int duration = std::chrono::duration_cast<std::chrono::seconds>(
-                               now - focus_start_time)
-                               .count();
+            int new_id = focus_data["id"].is_number() ? (int)focus_data["id"] : -1;
 
-            int new_id =
-                focus_data["id"].is_number() ? (int)focus_data["id"] : -1;
-
-            if (current_focused_id != -1 && current_focused_id != new_id &&
-                duration > 0) {
-              std::string app = "Unknown", title = "Unknown";
-
-              if (window_directory.count(current_focused_id)) {
-                app = window_directory[current_focused_id].first;
-                title = window_directory[current_focused_id].second;
+            if (current_focused_id != -1 && current_focused_id != new_id) {
+              if (!was_idle) {
+                int duration = std::chrono::duration_cast<std::chrono::seconds>(now - focus_start_time).count();
+                log_current_focus(duration);
               }
-
-              std::cout << "[LOGGED] " << app << " for " << duration << "s"
-                        << std::endl;
-
-              // save to sqlite
-              std::string sql =
-                  "INSERT INTO window_usage (app_id, window_title, "
-                  "duration_seconds) VALUES (?, ?, ?);";
-              sqlite3_stmt *stmt;
-              sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
-
-              sqlite3_bind_text(stmt, 1, app.c_str(), -1, SQLITE_TRANSIENT);
-              sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
-              sqlite3_bind_int(stmt, 3, duration);
-
-              sqlite3_step(stmt);
-              sqlite3_finalize(stmt);
             }
 
-            // update state
             current_focused_id = new_id;
             focus_start_time = now;
+            sync_focus_state();
           }
 
         } catch (json::parse_error &e) {
@@ -196,8 +262,12 @@ int main() {
         }
       }
     } else if (bytes_read == 0) {
-      std::cout << "[DISCONNECTED] Compositor closed the connection."
-                << std::endl;
+      std::cout << "[DISCONNECTED] Compositor closed the connection." << std::endl;
+      if (!was_idle) {
+        auto now = std::chrono::steady_clock::now();
+        int duration = std::chrono::duration_cast<std::chrono::seconds>(now - focus_start_time).count();
+        log_current_focus(duration);
+      }
       break;
     } else {
       perror("read");

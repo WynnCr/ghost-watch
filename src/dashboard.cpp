@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <thread>
 #include <vector>
+#include <filesystem>
 
 using namespace ftxui;
 struct Theme {
@@ -99,8 +100,8 @@ bool is_system_idle() {
   return stat("/tmp/ghost-watch-idle", &st) == 0;
 }
 void send_notification(const std::string &title, const std::string &body) {
-  std::system(("notify-send -a 'Ghost Watch' '" + title + "' '" + body + "' &")
-                  .c_str());
+  if (std::system(("notify-send -a 'Ghost Watch' '" + title + "' '" + body + "' &")
+                  .c_str())) {}
 }
 std::string db_path() {
   const char *home = std::getenv("HOME");
@@ -110,7 +111,7 @@ std::string db_path() {
   std::string dir = std::string(home) + "/.local/share/ghost-watch";
 
   // Ensure the directory exists before SQLite tries to open a file inside it
-  std::system(("mkdir -p " + dir).c_str());
+  std::filesystem::create_directories(dir);
 
   return dir + "/screentime.db";
 }
@@ -154,6 +155,7 @@ struct DBData {
   std::vector<TitleStat> titles;
   std::vector<DayStat> history;
   std::string active_app = "None";
+  std::string active_title = "None";
   bool is_idle = false;
   std::map<std::string, int> streaks;
   int history_days = 30;
@@ -161,7 +163,10 @@ struct DBData {
 
 class DB {
 public:
-  explicit DB(const std::string &path) { sqlite3_open(path.c_str(), &db_); }
+  explicit DB(const std::string &path) { 
+    sqlite3_open(path.c_str(), &db_); 
+    if (db_) sqlite3_busy_timeout(db_, 5000);
+  }
   ~DB() {
     if (db_)
       sqlite3_close(db_);
@@ -233,8 +238,59 @@ DBData fetch(int history_days = 30) {
         d.titles.push_back({DB::str(s, 0), DB::str(s, 1), DB::integer(s, 2)});
       });
 
-  db.query("SELECT app_id FROM window_usage ORDER BY timestamp DESC LIMIT 1;",
-           [&](sqlite3_stmt *s) { d.active_app = DB::str(s, 0); });
+  std::ifstream app_file("/tmp/ghost-watch-current-app");
+  long long start_time = 0;
+  if (app_file) {
+    std::getline(app_file, d.active_app);
+    std::getline(app_file, d.active_title);
+    app_file >> start_time;
+  }
+  if (d.active_app.empty()) d.active_app = "None";
+  if (d.active_title.empty()) d.active_title = "None";
+
+  int live_secs = 0;
+  if (d.active_app != "None" && !d.is_idle && start_time > 0) {
+      live_secs = std::max(0LL, (long long)time(nullptr) - start_time);
+  }
+
+  if (live_secs > 0) {
+      d.total_today += live_secs;
+      
+      bool found_app = false;
+      for (auto &a : d.apps) {
+          if (a.name == d.active_app) {
+              a.duration += live_secs;
+              found_app = true;
+              break;
+          }
+      }
+      if (!found_app) {
+          d.apps.push_back({d.active_app, live_secs, 1});
+      }
+
+      bool found_title = false;
+      for (auto &t : d.titles) {
+          if (t.app == d.active_app && t.title == d.active_title) {
+              t.duration += live_secs;
+              found_title = true;
+              break;
+          }
+      }
+      if (!found_title) {
+          d.titles.push_back({d.active_app, d.active_title, live_secs});
+      }
+
+      std::sort(d.apps.begin(), d.apps.end(), [](const AppStat& a, const AppStat& b) {
+          return a.duration > b.duration;
+      });
+      std::sort(d.titles.begin(), d.titles.end(), [](const TitleStat& a, const TitleStat& b) {
+          return a.duration > b.duration;
+      });
+
+      time_t t = time(0);
+      tm *ltm = localtime(&t);
+      d.hourly[ltm->tm_hour] += live_secs;
+  }
 
   for (int i = history_days - 1; i >= 0; --i) {
     char buf[32];
@@ -295,15 +351,22 @@ std::vector<Goal> load_goals() {
     std::string limit_str;
     std::getline(ss, g.app, '|');
     std::getline(ss, limit_str);
-    g.limit_seconds = std::stoi(limit_str);
+    try {
+        g.limit_seconds = std::stoi(limit_str);
+    } catch (...) {
+        continue;
+    }
     goals.push_back(g);
   }
   return goals;
 }
 void save_goals(const std::vector<Goal> &goals) {
   std::string p = goals_path();
-  std::string dir = p.substr(0, p.rfind('/'));
-  std::system(("mkdir -p " + dir).c_str());
+  size_t slash = p.rfind('/');
+  if (slash != std::string::npos) {
+    std::string dir = p.substr(0, slash);
+    std::filesystem::create_directories(dir);
+  }
   std::ofstream f(p);
   for (auto &g : goals)
     f << g.app << "|" << g.limit_seconds << "\n";
@@ -401,14 +464,15 @@ int main() {
     if (s.index >= (int)filtered_apps.size())
       return text("");
     bool sel = s.state;
+    bool foc = s.focused;
     auto &a = filtered_apps[s.index];
-    auto row = hbox({text(sel ? " ▶ " : "   ") | color(T.primary),
-                     text(a.name) | (sel ? bold : nothing) |
-                         color(sel ? T.fg : T.overlay) | flex,
-                     text(format_time(a.duration)) | (sel ? bold : nothing) |
-                         color(sel ? T.fg : T.overlay),
+    auto row = hbox({text(sel ? " ▶ " : "   "),
+                     text(a.name) | (sel || foc ? bold : nothing) | flex,
+                     text(format_time(a.duration)) | (sel || foc ? bold : nothing),
                      text(" ")});
-    return row | (sel ? bgcolor(T.surface1) : borderEmpty);
+    Color bg = (sel && foc) ? T.primary : (foc ? T.surface2 : T.surface1);
+    return row | color(sel || foc ? T.fg : T.overlay) | 
+           (sel || foc ? bgcolor(bg) : nothing);
   };
   auto app_menu = Menu(&app_menu_entries, &app_sel, app_menu_opt);
 
@@ -417,18 +481,19 @@ int main() {
     if (s.index >= (int)filtered_titles.size())
       return text("");
     bool sel = s.state;
+    bool foc = s.focused;
     auto &t = filtered_titles[s.index];
     std::string display = t.title.empty() ? "(Unknown Window)" : t.title;
     if ((int)display.size() > 50)
       display = display.substr(0, 47) + "...";
-    auto row = hbox({text(sel ? " ▶ " : "   ") | color(T.primary),
-                     text(t.app) | color(T.secondary) | size(WIDTH, EQUAL, 16),
-                     text(display) | (sel ? bold : nothing) |
-                         color(sel ? T.fg : T.overlay) | flex,
-                     text(format_time(t.duration)) | (sel ? bold : nothing) |
-                         color(T.primary),
+    auto row = hbox({text(sel ? " ▶ " : "   "),
+                     text(t.app) | size(WIDTH, EQUAL, 16),
+                     text(display) | (sel || foc ? bold : nothing) | flex,
+                     text(format_time(t.duration)) | (sel || foc ? bold : nothing),
                      text(" ")});
-    return row | (sel ? bgcolor(T.surface1) : borderEmpty);
+    Color bg = (sel && foc) ? T.primary : (foc ? T.surface2 : T.surface1);
+    return row | color(sel || foc ? T.fg : T.overlay) | 
+           (sel || foc ? bgcolor(bg) : nothing);
   };
   auto title_menu = Menu(&title_menu_entries, &title_sel, title_menu_opt);
 
@@ -437,6 +502,7 @@ int main() {
     if (s.index >= (int)goals.size())
       return text("");
     bool sel = s.state;
+    bool foc = s.focused;
     auto &g = goals[s.index];
     std::map<std::string, int> usage;
     for (auto &a : data.apps)
@@ -447,23 +513,25 @@ int main() {
         g.limit_seconds > 0 ? std::min(1.f, (float)used / g.limit_seconds) : 0;
     bool over = used >= g.limit_seconds;
     Color bar_col = over ? T.danger : pct > 0.75f ? T.warning : T.primary;
+    bool active = sel || foc;
 
     auto row = vbox(
-        {hbox({text(sel ? " ▶ " : "   ") | color(T.primary),
+        {hbox({text(sel ? " ▶ " : "   ") | color(active ? T.fg : T.primary),
                text(g.app.empty() ? "Total Screen Time" : g.app) | bold |
-                   color(sel ? T.fg : T.overlay) | flex,
+                   color(active ? T.fg : T.overlay) | flex,
                text(format_time(used) + " / " + format_time(g.limit_seconds)) |
-                   color(over ? T.danger : T.overlay),
-               text(over ? " OVER " : " ") | bold | color(T.danger),
+                   color(active ? T.fg : (over ? T.danger : T.overlay)),
+               text(over ? " OVER " : " ") | bold | color(active ? T.warning : T.danger),
                text(" ")}),
          separatorEmpty(),
          hbox({text("   "),
-               gauge(pct) | color(bar_col) | size(HEIGHT, EQUAL, 1) | flex,
+               gauge(pct) | color(active ? T.fg : bar_col) | size(HEIGHT, EQUAL, 1) | flex,
                text(" " + std::to_string((int)(pct * 100)) + "%") | dim |
-                   color(T.overlay),
+                   color(active ? T.fg : T.overlay),
                text(" ")}),
          separatorEmpty()});
-    return row | (sel ? bgcolor(T.surface1) : borderEmpty);
+    Color bg = (sel && foc) ? T.primary : (foc ? T.surface2 : T.surface1);
+    return row | (sel || foc ? bgcolor(bg) : nothing);
   };
   auto goal_menu = Menu(&goal_menu_entries, &goal_sel, goal_menu_opt);
 
@@ -556,8 +624,8 @@ int main() {
 
   auto render_apps = [&]() -> Element {
     auto list = card_panel(vbox({
-        app_search_input->Render() | color(T.fg) | bgcolor(T.surface1) |
-            borderEmpty,
+        app_search_input->Render() | color(T.fg) | borderEmpty |
+            bgcolor(app_search_input->Focused() ? T.primary : T.surface1),
         separatorLight() | color(T.surface2),
         app_menu->Render() | vscroll_indicator | yframe | flex,
     }));
@@ -620,8 +688,8 @@ int main() {
 
   auto render_titles = [&]() -> Element {
     auto list = card_panel(vbox({
-        title_search_input->Render() | color(T.fg) | bgcolor(T.surface1) |
-            borderEmpty,
+        title_search_input->Render() | color(T.fg) | borderEmpty |
+            bgcolor(title_search_input->Focused() ? T.primary : T.surface1),
         separatorLight() | color(T.surface2),
         title_menu->Render() | vscroll_indicator | yframe | flex,
     }));
@@ -664,10 +732,12 @@ int main() {
               section_title("Add New Limit"),
               separatorEmpty(),
               text("Target App (empty = total):") | dim | color(T.overlay),
-              goal_app_input->Render() | bgcolor(T.surface1) | borderEmpty,
+              goal_app_input->Render() | borderEmpty |
+                  bgcolor(goal_app_input->Focused() ? T.primary : T.surface1),
               separatorEmpty(),
               text("Time Limit (minutes):") | dim | color(T.overlay),
-              goal_limit_input->Render() | bgcolor(T.surface1) | borderEmpty,
+              goal_limit_input->Render() | borderEmpty |
+                  bgcolor(goal_limit_input->Focused() ? T.primary : T.surface1),
               separatorEmpty(),
               filler(),
               text("[Enter] Save   [Esc] Cancel") | dim | color(T.overlay) |
@@ -801,18 +871,31 @@ int main() {
                text("[r] Reset   [F2] Hide") | dim | color(T.overlay) | hcenter,
            }) |
            borderRounded | color(T.surface2) | bgcolor(T.surface0) |
-           size(WIDTH, EQUAL, 35) | center | clear_under;
+           size(WIDTH, EQUAL, 35) | center;
   };
 
   // Routing
   std::vector<std::string> tab_labels = {" Dashboard ", " Apps ", " Windows ",
                                          " Limits ", " History "};
-  auto tab_toggle = Toggle(&tab_labels, &active_tab);
+  
+  MenuOption tab_opt = MenuOption::Horizontal();
+  tab_opt.entries_option.transform = [&](const EntryState &s) {
+    bool sel = s.state;
+    bool foc = s.focused;
+    Color bg = (sel && foc) ? T.primary : (foc ? T.surface2 : T.surface1);
+    return text(s.label) | (sel || foc ? bold : nothing) |
+           color(sel || foc ? T.fg : T.overlay) |
+           (sel || foc ? bgcolor(bg) : nothing) |
+           (sel ? underlined : nothing);
+  };
+  auto tab_toggle = Menu(&tab_labels, &active_tab, tab_opt);
 
   auto apps_container = Container::Vertical({app_search_input, app_menu});
   auto titles_container = Container::Vertical({title_search_input, title_menu});
-  auto goals_container =
-      Container::Vertical({goal_app_input, goal_limit_input, goal_menu});
+  auto goals_container = Container::Vertical({
+      Maybe(Container::Vertical({goal_app_input, goal_limit_input}), &goal_editing),
+      goal_menu
+  });
   auto history_container = Container::Vertical({range_toggle});
 
   auto tabs_container =
@@ -863,11 +946,11 @@ int main() {
     }
 
     std::string keys_by_tab[] = {
-        " [1-5] Tabs   [F2] Pomodoro   [q] Quit ",
-        " [Mouse] Scroll/Click   [F2] Pomodoro   [q] Quit ",
-        " [Mouse] Scroll/Click   [F2] Pomodoro   [q] Quit ",
+        " [1-5] Tabs   [↑/↓] Navigate   [F2] Pomodoro   [q] Quit ",
+        " [1-5] Tabs   [↑/↓] Navigate   [F2] Pomodoro   [q] Quit ",
+        " [1-5] Tabs   [↑/↓] Navigate   [F2] Pomodoro   [q] Quit ",
         " [a] Add Limit   [d] Delete   [F2] Pomodoro   [q] Quit ",
-        " [Mouse] Click Ranges   [←/→] Navigate Days   [q] Quit ",
+        " [←/→] Navigate Days   [F2] Pomodoro   [q] Quit ",
     };
 
     auto main_ui = vbox({separatorEmpty(), header, separatorEmpty(),
@@ -882,11 +965,26 @@ int main() {
     return main_ui;
   });
 
+  class FallbackEvent : public ComponentBase {
+  public:
+    FallbackEvent(Component child, std::function<bool(Event)> handler)
+        : child_(child), handler_(handler) {
+      Add(child_);
+    }
+    bool OnEvent(Event e) override {
+      if (child_->OnEvent(e)) return true;
+      return handler_(e);
+    }
+  private:
+    Component child_;
+    std::function<bool(Event)> handler_;
+  };
+
   // Event Handler
-  auto event_handler = CatchEvent(root_renderer, [&](Event e) -> bool {
+  auto event_handler = Make<FallbackEvent>(root_renderer, [&](Event e) -> bool {
     std::lock_guard<std::recursive_mutex> lk(mtx);
 
-    if (e == Event::Escape || e == Event::Character('q')) {
+    if (e == Event::Escape || (e == Event::Character('q') && !goal_editing)) {
       if (goal_editing) {
         goal_editing = false;
         return true;
@@ -895,26 +993,11 @@ int main() {
       return true;
     }
 
-    if (e == Event::Character('1')) {
-      active_tab = 0;
-      return true;
-    }
-    if (e == Event::Character('2')) {
-      active_tab = 1;
-      return true;
-    }
-    if (e == Event::Character('3')) {
-      active_tab = 2;
-      return true;
-    }
-    if (e == Event::Character('4')) {
-      active_tab = 3;
-      return true;
-    }
-    if (e == Event::Character('5')) {
-      active_tab = 4;
-      return true;
-    }
+    if (e == Event::Character('1')) { active_tab = 0; return true; }
+    if (e == Event::Character('2')) { active_tab = 1; return true; }
+    if (e == Event::Character('3')) { active_tab = 2; return true; }
+    if (e == Event::Character('4')) { active_tab = 3; return true; }
+    if (e == Event::Character('5')) { active_tab = 4; return true; }
 
     if (e == Event::F2) {
       show_pomo = !show_pomo;
@@ -997,13 +1080,21 @@ int main() {
         std::lock_guard<std::recursive_mutex> lk(mtx);
 
         // Live UI without hammering SQLite
-        if (!data.is_idle && data.active_app != "None") {
+        bool currently_idle = is_system_idle();
+        if (!currently_idle && data.active_app != "None") {
           data.total_today++;
-          for (auto &a : data.apps)
+          for (auto &a : data.apps) {
             if (a.name == data.active_app) {
               a.duration++;
               break;
             }
+          }
+          for (auto &t_stat : data.titles) {
+            if (t_stat.app == data.active_app && t_stat.title == data.active_title) {
+              t_stat.duration++;
+              break;
+            }
+          }
           time_t t = time(0);
           tm *ltm = localtime(&t);
           data.hourly[ltm->tm_hour]++;
