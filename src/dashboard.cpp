@@ -185,9 +185,10 @@ int main() {
 
   auto render_dashboard = [&]() -> Element {
     int delta = data.total_today - data.total_yesterday;
-    std::string delta_str =
-        (delta >= 0 ? "+" : "-") + format_time(std::abs(delta));
-    Color delta_col = delta >= 0 ? T.overlay : T.success;
+    std::string arrow = delta > 0 ? "▲ " : delta < 0 ? "▼ " : "  ";
+    std::string delta_str = arrow + format_time(std::abs(delta));
+    // Less than yesterday = green (good), more = warning (bad)
+    Color delta_col = delta > 0 ? T.warning : delta < 0 ? T.success : T.overlay;
 
     auto stat_block = [&](const std::string &label, const std::string &val,
                           Color c) {
@@ -198,12 +199,12 @@ int main() {
 
     auto top_metrics = card_panel(hbox({
         stat_block("SCREEN TIME", format_time(data.total_today), T.fg),
+        stat_block("YESTERDAY", format_time(data.total_yesterday), T.overlay),
         stat_block("VS YESTERDAY", delta_str, delta_col),
         stat_block("PEAK HOUR",
                    data.peak_hour >= 0 ? std::to_string(data.peak_hour) + ":00"
                                        : "--",
                    T.primary),
-        stat_block("CURRENT WINDOW", data.active_app, T.fg),
     }));
 
     Elements hourly_bars;
@@ -566,6 +567,7 @@ int main() {
         filler(),
         tab_toggle->Render() | color(T.fg),
         filler(),
+        text(" " + data.active_app + " ") | dim | color(T.overlay),
         text(data.is_idle ? " IDLE  " : " LIVE  ") | bold |
             color(data.is_idle ? T.warning : T.success),
     });
@@ -741,7 +743,13 @@ int main() {
           }
           time_t t = time(0);
           tm *ltm = localtime(&t);
-          data.hourly[ltm->tm_hour]++;
+          int cur_hour = ltm->tm_hour;
+          data.hourly[cur_hour]++;
+          // Keep peak_hour in sync
+          if (data.hourly[cur_hour] > data.peak_hour_val) {
+            data.peak_hour_val = data.hourly[cur_hour];
+            data.peak_hour = cur_hour;
+          }
         }
 
         if (pomo.active) {
