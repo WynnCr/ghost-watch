@@ -144,7 +144,8 @@ DBData fetch_db_data(int history_days) {
       });
 
       time_t t = time(0);
-      tm *ltm = localtime(&t);
+      struct tm ltm_data;
+      tm *ltm = localtime_r(&t, &ltm_data);
       d.hourly[ltm->tm_hour] += live_secs;
   }
 

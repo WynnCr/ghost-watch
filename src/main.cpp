@@ -321,5 +321,5 @@ int main() {
 
   close(sock);
   sqlite3_close(db);
-  return 0;
+  return 1; // Return 1 to trigger systemd Restart=on-failure
 }

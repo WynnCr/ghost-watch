@@ -30,7 +30,8 @@ int main() {
   PomodoroState pomo;
 
   int active_tab = 0;
-  int history_range = 30, range_idx = 2; // Default range is 30d (idx 2)
+  std::atomic<int> history_range{30};
+  int range_idx = 2; // Default range is 30d (idx 2)
   int app_sel = 0, title_sel = 0, hist_sel = 0, goal_sel = 0;
   bool show_pomo = false, goal_editing = false;
   std::string app_search, title_search, goal_edit_app, goal_edit_limit;
@@ -701,7 +702,8 @@ int main() {
         // Reset goal notifications at midnight
         static std::string last_day = "";
         time_t t = time(nullptr);
-        tm *ltm = localtime(&t);
+        struct tm ltm_data;
+        tm *ltm = localtime_r(&t, &ltm_data);
         char buf[32];
         snprintf(buf, sizeof(buf), "%04d-%02d-%02d", 1900 + ltm->tm_year, 1 + ltm->tm_mon, ltm->tm_mday);
         std::string current_day(buf);
@@ -773,7 +775,8 @@ int main() {
           }
           if (!found_t) data.titles.push_back({data.active_app, data.active_title, 1});
           time_t t = time(0);
-          tm *ltm = localtime(&t);
+          struct tm ltm_data;
+          tm *ltm = localtime_r(&t, &ltm_data);
           int cur_hour = ltm->tm_hour;
           data.hourly[cur_hour]++;
           // Keep peak_hour in sync
