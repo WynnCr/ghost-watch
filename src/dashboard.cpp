@@ -36,7 +36,6 @@ int main() {
   DBData data;
   std::vector<Goal> goals = load_goals();
   PomodoroState pomo;
-  std::recursive_mutex mtx;
 
   int active_tab = 0;
   int history_range = 30, range_idx = 2; // Default range is 30d (idx 2)
@@ -107,7 +106,6 @@ int main() {
 
   InputOption input_opt;
   input_opt.on_change = [&] {
-    std::lock_guard<std::recursive_mutex> lk(mtx);
     reconcile();
   };
   auto app_search_input = Input(&app_search, "Search Apps...", input_opt);
@@ -561,7 +559,7 @@ int main() {
   auto main_layout = Container::Vertical({tab_toggle, tabs_container});
 
   auto root_renderer = Renderer(main_layout, [&]() -> Element {
-    std::lock_guard<std::recursive_mutex> lk(mtx);
+
     reconcile();
 
     if (active_tab != 4) {
@@ -638,7 +636,7 @@ int main() {
 
   // Event Handler
   auto event_handler = Make<FallbackEvent>(root_renderer, [&](Event e) -> bool {
-    std::lock_guard<std::recursive_mutex> lk(mtx);
+
 
     if (e == Event::Escape || (e == Event::Character('q') && !goal_editing)) {
       if (goal_editing) {
@@ -718,12 +716,27 @@ int main() {
       if (!running)
         break;
       auto fresh = fetch_db_data(history_range);
-      {
-        std::lock_guard<std::recursive_mutex> lk(mtx);
+      
+      screen.Post([&, fresh]() {
+        // Reset goal notifications at midnight
+        static std::string last_day = "";
+        time_t t = time(nullptr);
+        tm *ltm = localtime(&t);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02d", 1900 + ltm->tm_year, 1 + ltm->tm_mon, ltm->tm_mday);
+        std::string current_day(buf);
+        
+        if (last_day != "" && last_day != current_day) {
+            for (auto &g : goals) {
+                g.notified = false;
+            }
+        }
+        last_day = current_day;
+
         data = fresh;
         check_goals();
-      }
-      screen.PostEvent(Event::Custom);
+        reconcile(); // Dynamically update lists!
+      });
     }
   });
 
@@ -732,9 +745,7 @@ int main() {
       std::this_thread::sleep_for(std::chrono::seconds(1));
       if (!running)
         break;
-      {
-        std::lock_guard<std::recursive_mutex> lk(mtx);
-
+      screen.Post([&] {
         // Live UI without hammering SQLite
         bool currently_idle = is_system_idle();
         if (!currently_idle && data.active_app != "None") {
@@ -772,8 +783,7 @@ int main() {
             }
           }
         }
-      }
-      screen.PostEvent(Event::Custom);
+      });
     }
   });
 
