@@ -59,6 +59,8 @@ class DB {
 public:
   explicit DB(const std::string &path);
   ~DB();
+  DB(const DB&) = delete;
+  DB& operator=(const DB&) = delete;
   
   void query(const std::string &sql, std::function<void(sqlite3_stmt *)> cb,
              std::function<void(sqlite3_stmt *)> bind = {});

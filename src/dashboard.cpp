@@ -2,25 +2,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <ctime>
-#include <fstream>
+#include <map>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
-#include <ftxui/screen/screen.hpp>
-#include <map>
-#include <mutex>
-#include <set>
-#include <sqlite3.h>
-#include <sstream>
-#include <string>
-#include <sys/stat.h>
-#include <thread>
-#include <vector>
-#include <filesystem>
 
 using namespace ftxui;
 #include "theme.hpp"
@@ -195,7 +186,7 @@ int main() {
   auto render_dashboard = [&]() -> Element {
     int delta = data.total_today - data.total_yesterday;
     std::string delta_str =
-        (delta >= 0 ? "+" : "") + format_time(std::abs(delta));
+        (delta >= 0 ? "+" : "-") + format_time(std::abs(delta));
     Color delta_col = delta >= 0 ? T.overlay : T.success;
 
     auto stat_block = [&](const std::string &label, const std::string &val,
@@ -409,8 +400,11 @@ int main() {
                                           : 90;
     if (target_range != history_range) {
       history_range = target_range;
-      reload();
-      reconcile();
+      // Defer reload to avoid blocking the render thread
+      screen.Post([&]() {
+        reload();
+        reconcile();
+      });
     }
 
     Elements bars;
@@ -560,8 +554,6 @@ int main() {
 
   auto root_renderer = Renderer(main_layout, [&]() -> Element {
 
-    reconcile();
-
     if (active_tab != 4) {
       range_idx = history_range == 7    ? 0
                   : history_range == 14 ? 1
@@ -619,23 +611,8 @@ int main() {
     return main_ui;
   });
 
-  class FallbackEvent : public ComponentBase {
-  public:
-    FallbackEvent(Component child, std::function<bool(Event)> handler)
-        : child_(child), handler_(handler) {
-      Add(child_);
-    }
-    bool OnEvent(Event e) override {
-      if (child_->OnEvent(e)) return true;
-      return handler_(e);
-    }
-  private:
-    Component child_;
-    std::function<bool(Event)> handler_;
-  };
-
   // Event Handler
-  auto event_handler = Make<FallbackEvent>(root_renderer, [&](Event e) -> bool {
+  auto event_handler = FallbackEvent(root_renderer, [&](Event e) -> bool {
 
 
     if (e == Event::Escape || (e == Event::Character('q') && !goal_editing)) {

@@ -53,7 +53,22 @@ bool is_system_idle() {
   return stat("/tmp/ghost-watch-idle", &st) == 0;
 }
 
+// Escape single quotes for safe shell interpolation: ' -> '\''
+static std::string shell_escape(const std::string &s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  return out;
+}
+
 void send_notification(const std::string &title, const std::string &body) {
-  if (std::system(("notify-send -a 'Ghost Watch' '" + title + "' '" + body + "' &")
-                  .c_str())) {}
+  std::string cmd = "notify-send -a 'Ghost Watch' '"
+                    + shell_escape(title) + "' '"
+                    + shell_escape(body) + "' &";
+  if (std::system(cmd.c_str())) {}
 }

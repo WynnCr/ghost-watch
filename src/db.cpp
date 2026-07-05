@@ -104,6 +104,9 @@ DBData fetch_db_data(int history_days) {
   int live_secs = 0;
   if (d.active_app != "None" && !d.is_idle && start_time > 0) {
       live_secs = std::max(0LL, (long long)time(nullptr) - start_time);
+      // The daemon flushes every 60s, so anything beyond 120s means the
+      // timestamp file is stale (daemon crashed or was stopped).
+      if (live_secs > 120) live_secs = 0;
   }
 
   if (live_secs > 0) {

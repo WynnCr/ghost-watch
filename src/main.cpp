@@ -91,7 +91,7 @@ int main() {
   }
 
   // Address setup
-  struct sockaddr_un addr;
+  struct sockaddr_un addr = {};
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
 
