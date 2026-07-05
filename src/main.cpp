@@ -184,6 +184,14 @@ int main() {
         focus_start_time = now;
         was_idle = is_idle;
         sync_focus_state();
+      } else if (!is_idle && !was_idle) {
+        // Actively being used. Flush to DB every 60 seconds to prevent overnight time bleed.
+        int duration = std::chrono::duration_cast<std::chrono::seconds>(now - focus_start_time).count();
+        if (duration >= 60) {
+          log_current_focus(duration);
+          focus_start_time = now;
+          sync_focus_state();
+        }
       }
       
       was_idle = is_idle;
