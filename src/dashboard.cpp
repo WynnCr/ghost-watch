@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <fstream>
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
@@ -724,23 +725,44 @@ int main() {
       std::this_thread::sleep_for(std::chrono::seconds(1));
       if (!running)
         break;
-      screen.Post([&] {
+
+      std::string current_app = "None", current_title = "None";
+      std::ifstream app_file("/tmp/ghost-watch-current-app");
+      if (app_file) {
+        std::getline(app_file, current_app);
+        std::getline(app_file, current_title);
+      }
+      if (current_app.empty()) current_app = "None";
+      if (current_title.empty()) current_title = "None";
+
+      screen.Post([&, current_app, current_title] {
+        data.active_app = current_app;
+        data.active_title = current_title;
+        
         // Live UI without hammering SQLite
         bool currently_idle = is_system_idle();
         if (!currently_idle && data.active_app != "None") {
           data.total_today++;
+          
+          bool found_a = false;
           for (auto &a : data.apps) {
             if (a.name == data.active_app) {
               a.duration++;
+              found_a = true;
               break;
             }
           }
+          if (!found_a) data.apps.push_back({data.active_app, 1, 1});
+          
+          bool found_t = false;
           for (auto &t_stat : data.titles) {
             if (t_stat.app == data.active_app && t_stat.title == data.active_title) {
               t_stat.duration++;
+              found_t = true;
               break;
             }
           }
+          if (!found_t) data.titles.push_back({data.active_app, data.active_title, 1});
           time_t t = time(0);
           tm *ltm = localtime(&t);
           int cur_hour = ltm->tm_hour;
