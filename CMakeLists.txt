@@ -16,7 +16,7 @@ include(FetchContent)
 FetchContent_Declare(ftxui GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI GIT_TAG v7.0.0)
 FetchContent_MakeAvailable(ftxui)
 
-add_executable(ghost-watch-tui src/dashboard.cpp)
+add_executable(ghost-watch-tui src/dashboard.cpp src/db.cpp src/utils.cpp src/components.cpp)
 target_link_libraries(ghost-watch-tui PRIVATE ftxui::ftxui SQLite3::SQLite3)
 
 add_executable(ghost-watch-daemon src/main.cpp)
