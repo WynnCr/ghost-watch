@@ -118,27 +118,23 @@ int main() {
 
   // State trackers
   int current_focused_id = -1;
+  std::string current_app = "None";
+  std::string current_title = "None";
   auto focus_start_time = std::chrono::steady_clock::now();
   std::map<int, std::pair<std::string, std::string>> window_directory;
   bool was_idle = false;
 
   auto log_current_focus = [&](int duration) {
-    if (current_focused_id != -1 && duration > 0) {
-      std::string app = "Unknown", title = "Unknown";
-      if (window_directory.count(current_focused_id)) {
-        app = window_directory[current_focused_id].first;
-        title = window_directory[current_focused_id].second;
-      }
-
-      std::cout << "[LOGGED] " << app << " for " << duration << "s" << std::endl;
+    if (current_focused_id != -1 && duration > 0 && current_app != "None") {
+      std::cout << "[LOGGED] " << current_app << " for " << duration << "s" << std::endl;
 
       std::string sql =
           "INSERT INTO window_usage (app_id, window_title, duration_seconds) VALUES (?, ?, ?);";
       sqlite3_stmt *stmt;
       sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
 
-      sqlite3_bind_text(stmt, 1, app.c_str(), -1, SQLITE_TRANSIENT);
-      sqlite3_bind_text(stmt, 2, title.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 1, current_app.c_str(), -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(stmt, 2, current_title.c_str(), -1, SQLITE_TRANSIENT);
       sqlite3_bind_int(stmt, 3, duration);
 
       sqlite3_step(stmt);
@@ -147,16 +143,13 @@ int main() {
   };
 
   auto sync_focus_state = [&]() {
-    std::string active_app = "None";
-    std::string active_title = "None";
-    if (!was_idle && current_focused_id != -1 && window_directory.count(current_focused_id)) {
-      active_app = window_directory[current_focused_id].first;
-      active_title = window_directory[current_focused_id].second;
-    }
     std::ofstream app_file("/tmp/ghost-watch-current-app");
     if (app_file) {
-      app_file << active_app << "\n";
-      app_file << active_title << "\n";
+      if (was_idle || current_focused_id == -1) {
+        app_file << "None\nNone\n";
+      } else {
+        app_file << current_app << "\n" << current_title << "\n";
+      }
       app_file << (long long)time(nullptr) << "\n";
     }
   };
@@ -226,6 +219,11 @@ int main() {
                 std::string app = window["app_id"].is_string() ? window["app_id"] : "Unknown App";
                 std::string title = window["title"].is_string() ? window["title"] : "No Title";
                 window_directory[win_id] = {app, title};
+                
+                if (win_id == current_focused_id) {
+                    current_app = app;
+                    current_title = title;
+                }
               }
             }
           }
@@ -236,7 +234,30 @@ int main() {
               int win_id = window["id"];
               std::string app = window["app_id"].is_string() ? window["app_id"] : "Unknown App";
               std::string title = window["title"].is_string() ? window["title"] : "No Title";
+              
+              bool changed = false;
+              if (window_directory.count(win_id)) {
+                  if (window_directory[win_id].first != app || window_directory[win_id].second != title) {
+                      changed = true;
+                  }
+              } else {
+                  changed = true;
+              }
+
+              if (changed && win_id == current_focused_id && !was_idle) {
+                  auto now = std::chrono::steady_clock::now();
+                  int duration = std::chrono::duration_cast<std::chrono::seconds>(now - focus_start_time).count();
+                  log_current_focus(duration);
+                  focus_start_time = now;
+              }
+
               window_directory[win_id] = {app, title};
+              
+              if (changed && win_id == current_focused_id) {
+                  current_app = app;
+                  current_title = title;
+                  sync_focus_state();
+              }
             }
           }
 
@@ -261,6 +282,14 @@ int main() {
             }
 
             current_focused_id = new_id;
+            if (current_focused_id != -1 && window_directory.count(current_focused_id)) {
+              current_app = window_directory[current_focused_id].first;
+              current_title = window_directory[current_focused_id].second;
+            } else {
+              current_app = "None";
+              current_title = "None";
+            }
+            
             focus_start_time = now;
             sync_focus_state();
           }
