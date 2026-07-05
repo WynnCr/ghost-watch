@@ -213,6 +213,7 @@ int main() {
           json event = json::parse(line);
 
           if (event.contains("WindowsChanged")) {
+            bool current_window_changed = false;
             for (auto &window : event["WindowsChanged"]["windows"]) {
               if (window["id"].is_number()) {
                 int win_id = window["id"];
@@ -221,10 +222,16 @@ int main() {
                 window_directory[win_id] = {app, title};
                 
                 if (win_id == current_focused_id) {
-                    current_app = app;
-                    current_title = title;
+                    if (current_app != app || current_title != title) {
+                        current_app = app;
+                        current_title = title;
+                        current_window_changed = true;
+                    }
                 }
               }
+            }
+            if (current_window_changed) {
+                sync_focus_state();
             }
           }
 

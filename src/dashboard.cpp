@@ -713,7 +713,16 @@ int main() {
         }
         last_day = current_day;
 
+        std::string latest_app = data.active_app;
+        std::string latest_title = data.active_title;
+        
         data = fresh;
+        
+        // Preserve the immediate active window state from pomo_thread
+        // to prevent flickering to a stale value read by fetch_db_data
+        data.active_app = latest_app;
+        data.active_title = latest_title;
+        
         check_goals();
         reconcile(); // Dynamically update lists!
       });
