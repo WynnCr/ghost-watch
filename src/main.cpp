@@ -143,14 +143,17 @@ int main() {
   };
 
   auto sync_focus_state = [&]() {
-    std::ofstream app_file("/tmp/ghost-watch-current-app");
+    std::string tmp_path = "/tmp/ghost-watch-current-app.tmp";
+    std::ofstream app_file(tmp_path);
     if (app_file) {
-      if (was_idle || current_focused_id == -1) {
+      if (current_focused_id == -1) {
         app_file << "None\nNone\n";
       } else {
         app_file << current_app << "\n" << current_title << "\n";
       }
       app_file << (long long)time(nullptr) << "\n";
+      app_file.close();
+      rename(tmp_path.c_str(), "/tmp/ghost-watch-current-app");
     }
   };
 
@@ -219,15 +222,20 @@ int main() {
                 int win_id = window["id"];
                 std::string app = window["app_id"].is_string() ? window["app_id"] : "Unknown App";
                 std::string title = window["title"].is_string() ? window["title"] : "No Title";
-                window_directory[win_id] = {app, title};
-                
                 if (win_id == current_focused_id) {
                     if (current_app != app || current_title != title) {
+                        if (!was_idle) {
+                            auto now = std::chrono::steady_clock::now();
+                            int duration = std::chrono::duration_cast<std::chrono::seconds>(now - focus_start_time).count();
+                            log_current_focus(duration);
+                            focus_start_time = now;
+                        }
                         current_app = app;
                         current_title = title;
                         current_window_changed = true;
                     }
                 }
+                window_directory[win_id] = {app, title};
               }
             }
             if (current_window_changed) {
